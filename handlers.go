@@ -141,10 +141,57 @@ func (s *server) Connect() http.HandlerFunc {
 		}
 
 		if clientManager.GetWhatsmeowClient(txtid) != nil {
-			s.Respond(w, r, http.StatusInternalServerError, errors.New("already connected"))
-			return
-		} else {
+			if clientManager.GetWhatsmeowClient(txtid).IsConnected() {
+				s.Respond(w, r, http.StatusInternalServerError, errors.New("already connected"))
+				return
+			} else {
+				clientManager.GetWhatsmeowClient(txtid).Connect()
+				if !t.Immediate {
+					log.Warn().Msg("Waiting 10 seconds")
+					time.Sleep(10000 * time.Millisecond)
+				}
 
+				if !clientManager.GetWhatsmeowClient(txtid).IsConnected() {
+					s.Respond(w, r, http.StatusInternalServerError, errors.New("failed to connect"))
+					return
+				}
+
+				var subscribedEvents []string
+				if len(t.Subscribe) < 1 {
+					if !Find(subscribedEvents, "") {
+						subscribedEvents = append(subscribedEvents, "")
+					}
+				} else {
+					for _, arg := range t.Subscribe {
+						if !Find(supportedEventTypes, arg) {
+							log.Warn().Str("Type", arg).Msg("Event type discarded")
+							continue
+						}
+						if !Find(subscribedEvents, arg) {
+							subscribedEvents = append(subscribedEvents, arg)
+						}
+					}
+				}
+				eventstring = strings.Join(subscribedEvents, ",")
+				_, err = s.db.Exec("UPDATE users SET events=$1 WHERE id=$2", eventstring, txtid)
+				if err != nil {
+					log.Warn().Msg("Could not set events in users table")
+				}
+				log.Info().Str("events", eventstring).Msg("Setting subscribed events")
+				v := updateUserInfo(r.Context().Value("userinfo"), "Events", eventstring)
+				userinfocache.Set(token, v, cache.NoExpiration)
+
+				response := map[string]interface{}{"webhook": webhook, "jid": jid, "events": eventstring, "details": "Connected!"}
+				responseJson, err := json.Marshal(response)
+				if err != nil {
+					s.Respond(w, r, http.StatusInternalServerError, err)
+					return
+				} else {
+					s.Respond(w, r, http.StatusOK, string(responseJson))
+					return
+				}
+			}
+		} else {
 			var subscribedEvents []string
 			if len(t.Subscribe) < 1 {
 				if !Find(subscribedEvents, "") {
@@ -180,7 +227,7 @@ func (s *server) Connect() http.HandlerFunc {
 
 				if clientManager.GetWhatsmeowClient(txtid) != nil {
 					if !clientManager.GetWhatsmeowClient(txtid).IsConnected() {
-						s.Respond(w, r, http.StatusInternalServerError, errors.New("failed to Connect"))
+						s.Respond(w, r, http.StatusInternalServerError, errors.New("failed to connect"))
 						return
 					}
 				} else {
