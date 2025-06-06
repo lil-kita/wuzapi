@@ -117,135 +117,90 @@ func (s *server) authalice(next http.Handler) http.Handler {
 
 // Connects to Whatsapp Servers
 func (s *server) Connect() http.HandlerFunc {
-
 	type connectStruct struct {
 		Subscribe []string
 		Immediate bool
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
+		userInfo := r.Context().Value("userinfo").(Values)
+		webhook := userInfo.Get("Webhook")
+		jid := userInfo.Get("Jid")
+		txtid := userInfo.Get("Id")
+		token := userInfo.Get("Token")
 
-		webhook := r.Context().Value("userinfo").(Values).Get("Webhook")
-		jid := r.Context().Value("userinfo").(Values).Get("Jid")
-		txtid := r.Context().Value("userinfo").(Values).Get("Id")
-		token := r.Context().Value("userinfo").(Values).Get("Token")
-		eventstring := ""
-
-		// Decodes request BODY looking for events to subscribe
-		decoder := json.NewDecoder(r.Body)
-		var t connectStruct
-		err := decoder.Decode(&t)
-		if err != nil {
+		var req connectStruct
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			s.Respond(w, r, http.StatusBadRequest, errors.New("could not decode Payload"))
 			return
 		}
 
-		if clientManager.GetWhatsmeowClient(txtid) != nil {
-			if clientManager.GetWhatsmeowClient(txtid).IsConnected() {
+		// Validate and collect subscribed events
+		var subscribedEvents []string
+		for _, event := range req.Subscribe {
+			if !Find(supportedEventTypes, event) {
+				log.Warn().Str("Type", event).Msg("Event type discarded")
+				continue
+			}
+			if !Find(subscribedEvents, event) {
+				subscribedEvents = append(subscribedEvents, event)
+			}
+		}
+		eventstring := strings.Join(subscribedEvents, ",")
+
+		client := clientManager.GetWhatsmeowClient(txtid)
+		if client != nil {
+			if client.IsConnected() {
 				s.Respond(w, r, http.StatusInternalServerError, errors.New("already connected"))
 				return
-			} else {
-				clientManager.GetWhatsmeowClient(txtid).Connect()
-				if !t.Immediate {
-					log.Warn().Msg("Waiting 10 seconds")
-					time.Sleep(10000 * time.Millisecond)
-				}
+			}
 
-				if !clientManager.GetWhatsmeowClient(txtid).IsConnected() {
-					s.Respond(w, r, http.StatusInternalServerError, errors.New("failed to connect"))
-					return
-				}
-
-				var subscribedEvents []string
-				if len(t.Subscribe) < 1 {
-					if !Find(subscribedEvents, "") {
-						subscribedEvents = append(subscribedEvents, "")
-					}
-				} else {
-					for _, arg := range t.Subscribe {
-						if !Find(supportedEventTypes, arg) {
-							log.Warn().Str("Type", arg).Msg("Event type discarded")
-							continue
-						}
-						if !Find(subscribedEvents, arg) {
-							subscribedEvents = append(subscribedEvents, arg)
-						}
-					}
-				}
-				eventstring = strings.Join(subscribedEvents, ",")
-				_, err = s.db.Exec("UPDATE users SET events=$1 WHERE id=$2", eventstring, txtid)
-				if err != nil {
-					log.Warn().Msg("Could not set events in users table")
-				}
-				log.Info().Str("events", eventstring).Msg("Setting subscribed events")
-				v := updateUserInfo(r.Context().Value("userinfo"), "Events", eventstring)
-				userinfocache.Set(token, v, cache.NoExpiration)
-
-				response := map[string]interface{}{"webhook": webhook, "jid": jid, "events": eventstring, "details": "Connected!"}
-				responseJson, err := json.Marshal(response)
-				if err != nil {
-					s.Respond(w, r, http.StatusInternalServerError, err)
-					return
-				} else {
-					s.Respond(w, r, http.StatusOK, string(responseJson))
-					return
-				}
+			client.Connect()
+			if !req.Immediate {
+				log.Warn().Msg("Waiting 10 seconds")
+				time.Sleep(10 * time.Second)
+			}
+			if !client.IsConnected() {
+				s.Respond(w, r, http.StatusInternalServerError, errors.New("failed to connect"))
+				return
 			}
 		} else {
-			var subscribedEvents []string
-			if len(t.Subscribe) < 1 {
-				if !Find(subscribedEvents, "") {
-					subscribedEvents = append(subscribedEvents, "")
-				}
-			} else {
-				for _, arg := range t.Subscribe {
-					if !Find(supportedEventTypes, arg) {
-						log.Warn().Str("Type", arg).Msg("Event type discarded")
-						continue
-					}
-					if !Find(subscribedEvents, arg) {
-						subscribedEvents = append(subscribedEvents, arg)
-					}
-				}
-			}
-			eventstring = strings.Join(subscribedEvents, ",")
-			_, err = s.db.Exec("UPDATE users SET events=$1 WHERE id=$2", eventstring, txtid)
-			if err != nil {
-				log.Warn().Msg("Could not set events in users table")
-			}
-			log.Info().Str("events", eventstring).Msg("Setting subscribed events")
-			v := updateUserInfo(r.Context().Value("userinfo"), "Events", eventstring)
-			userinfocache.Set(token, v, cache.NoExpiration)
-
 			log.Info().Str("jid", jid).Msg("Attempt to connect")
 			killchannel[txtid] = make(chan bool)
 			go s.startClient(txtid, jid, token, subscribedEvents)
 
-			if t.Immediate == false {
+			if !req.Immediate {
 				log.Warn().Msg("Waiting 10 seconds")
-				time.Sleep(10000 * time.Millisecond)
-
-				if clientManager.GetWhatsmeowClient(txtid) != nil {
-					if !clientManager.GetWhatsmeowClient(txtid).IsConnected() {
-						s.Respond(w, r, http.StatusInternalServerError, errors.New("failed to connect"))
-						return
-					}
-				} else {
+				time.Sleep(10 * time.Second)
+				client = clientManager.GetWhatsmeowClient(txtid)
+				if client == nil || !client.IsConnected() {
 					s.Respond(w, r, http.StatusInternalServerError, errors.New("failed to connect"))
 					return
 				}
 			}
 		}
 
-		response := map[string]interface{}{"webhook": webhook, "jid": jid, "events": eventstring, "details": "Connected!"}
+		// Update events in DB and cache
+		if _, err := s.db.Exec("UPDATE users SET events=$1 WHERE id=$2", eventstring, txtid); err != nil {
+			log.Warn().Msg("Could not set events in users table")
+		}
+		log.Info().Str("events", eventstring).Msg("Setting subscribed events")
+		v := updateUserInfo(userInfo, "Events", eventstring)
+		userinfocache.Set(token, v, cache.NoExpiration)
+
+		response := map[string]any{
+			"webhook": webhook,
+			"jid":     jid,
+			"events":  eventstring,
+			"details": "Connected!",
+		}
 		responseJson, err := json.Marshal(response)
 		if err != nil {
 			s.Respond(w, r, http.StatusInternalServerError, err)
 			return
-		} else {
-			s.Respond(w, r, http.StatusOK, string(responseJson))
-			return
 		}
+
+		s.Respond(w, r, http.StatusOK, string(responseJson))
 	}
 }
 
