@@ -214,7 +214,7 @@ func (s *server) Disconnect() http.HandlerFunc {
 			s.Respond(w, r, http.StatusInternalServerError, errors.New("no session"))
 			return
 		}
-		if clientManager.GetWhatsmeowClient(txtid).IsConnected() == true {
+		if clientManager.GetWhatsmeowClient(txtid).IsConnected() {
 			//if clientManager.GetWhatsmeowClient(txtid).IsLoggedIn() == true {
 			log.Info().Str("jid", jid).Msg("Disconnection successfull")
 			_, err := s.db.Exec("UPDATE users SET connected=0,events=$1 WHERE id=$2", "", txtid)
@@ -242,6 +242,47 @@ func (s *server) Disconnect() http.HandlerFunc {
 			//	s.Respond(w, r, http.StatusInternalServerError, errors.New("Cannot disconnect because it is not logged in"))
 			//	return
 			//}
+		} else {
+			log.Warn().Str("jid", jid).Msg("Ignoring disconnect as it was not connected")
+			s.Respond(w, r, http.StatusInternalServerError, errors.New("cannot disconnect because it is not logged in"))
+			return
+		}
+	}
+}
+
+// Disconnects from Whatsapp websocket, try to emulate disconnection problem
+func (s *server) SoftDisconnect() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+
+		txtid := r.Context().Value("userinfo").(Values).Get("Id")
+		jid := r.Context().Value("userinfo").(Values).Get("Jid")
+		token := r.Context().Value("userinfo").(Values).Get("Token")
+
+		if clientManager.GetWhatsmeowClient(txtid) == nil {
+			s.Respond(w, r, http.StatusInternalServerError, errors.New("no session"))
+			return
+		}
+		if clientManager.GetWhatsmeowClient(txtid).IsConnected() {
+			clientManager.GetWhatsmeowClient(txtid).Disconnect()
+			log.Info().Str("jid", jid).Msg("Disconnection successfull")
+			_, err := s.db.Exec("UPDATE users SET connected=0,events=$1 WHERE id=$2", "", txtid)
+			if err != nil {
+				log.Warn().Str("txtid", txtid).Msg("Could not set events in users table")
+			}
+
+			log.Info().Str("txtid", txtid).Msg("Update DB on disconnection")
+			v := updateUserInfo(r.Context().Value("userinfo"), "Events", "")
+			userinfocache.Set(token, v, cache.NoExpiration)
+
+			response := map[string]interface{}{"Details": "Disconnected"}
+			responseJson, err := json.Marshal(response)
+
+			if err != nil {
+				s.Respond(w, r, http.StatusInternalServerError, err)
+			} else {
+				s.Respond(w, r, http.StatusOK, string(responseJson))
+			}
+			return
 		} else {
 			log.Warn().Str("jid", jid).Msg("Ignoring disconnect as it was not connected")
 			s.Respond(w, r, http.StatusInternalServerError, errors.New("cannot disconnect because it is not logged in"))
