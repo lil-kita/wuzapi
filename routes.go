@@ -73,6 +73,7 @@ func (s *server) routes() {
 
 	s.router.Handle("/session/connect", c.Then(s.Connect())).Methods("POST")
 	s.router.Handle("/session/disconnect", c.Then(s.Disconnect())).Methods("POST")
+	s.router.Handle("/session/soft-disconnect", c.Then(s.SoftDisconnect())).Methods("POST")
 	s.router.Handle("/session/logout", c.Then(s.Logout())).Methods("POST")
 	s.router.Handle("/session/status", c.Then(s.GetStatus())).Methods("GET")
 	s.router.Handle("/session/qr", c.Then(s.GetQR())).Methods("GET")

@@ -259,6 +259,21 @@ paths:
             application/json:
               schema:
                 example: { "code": 200, "data": { "details": "Connected!", "events": "Message", "jid": "5491155555555.0:53@s.whatsapp.net", "webhook": "https://some.site/webhook?request=parameter" }, "success": true }
+  /session/soft-disconnect:
+    post:
+      tags:
+        - Session 
+      summary: try to simulate disconnection bug
+      description:
+      security:
+        - ApiKeyAuth: []
+      responses:
+        200:
+          description: Response
+          content:
+            application/json:
+              schema:
+                example: { "code": 200, "data": { "Details": "Disconnected" }, "success": true }
   /session/disconnect:
     post:
       tags:
