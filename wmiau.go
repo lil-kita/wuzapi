@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -1258,10 +1259,28 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 		dowebhook = 1
 		log.Error().Str("reason", fmt.Sprintf("%+v", evt)).Msg("Failed to connect to Whatsapp")
 	default:
+		logEvent(evt)
 		log.Warn().Str("event", fmt.Sprintf("%+v", evt)).Msg("Unhandled event")
 	}
 
 	if dowebhook == 1 {
 		sendEventWithWebHook(mycli, postmap, path)
 	}
+}
+
+func logEvent(event interface{}) {
+	typeName := reflect.TypeOf(event)
+	if typeName.Kind() == reflect.Ptr {
+		typeName = typeName.Elem()
+	}
+
+	evtJSON, err := json.MarshalIndent(event, "", "  ")
+	if err != nil {
+		log.Info().Str("event", typeName.Name()).Msgf("Event (could not marshal event: %v)", err)
+		return
+	}
+	log.Info().
+		Str("event", typeName.Name()).
+		RawJSON("data", evtJSON).
+		Msg("Received event")
 }
