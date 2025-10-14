@@ -127,20 +127,25 @@ func (s *server) authalice(next http.Handler) http.Handler {
 
 // Connects to Whatsapp Servers
 func (s *server) Connect() http.HandlerFunc {
+
 	type connectStruct struct {
 		Subscribe []string
 		Immediate bool
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
-		userInfo := r.Context().Value("userinfo").(Values)
-		webhook := userInfo.Get("Webhook")
-		jid := userInfo.Get("Jid")
-		txtid := userInfo.Get("Id")
-		token := userInfo.Get("Token")
 
-		var req connectStruct
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		webhook := r.Context().Value("userinfo").(Values).Get("Webhook")
+		jid := r.Context().Value("userinfo").(Values).Get("Jid")
+		txtid := r.Context().Value("userinfo").(Values).Get("Id")
+		token := r.Context().Value("userinfo").(Values).Get("Token")
+		eventstring := ""
+
+		// Decodes request BODY looking for events to subscribe
+		decoder := json.NewDecoder(r.Body)
+		var t connectStruct
+		err := decoder.Decode(&t)
+		if err != nil {
 			s.Respond(w, r, http.StatusBadRequest, errors.New("could not decode Payload"))
 			return
 		}
@@ -197,27 +202,15 @@ func (s *server) Connect() http.HandlerFunc {
 			}
 		}
 
-		// Update events in DB and cache
-		if _, err := s.db.Exec("UPDATE users SET events=$1 WHERE id=$2", eventstring, txtid); err != nil {
-			log.Warn().Msg("Could not set events in users table")
-		}
-		log.Info().Str("events", eventstring).Msg("Setting subscribed events")
-		v := updateUserInfo(userInfo, "Events", eventstring)
-		userinfocache.Set(token, v, cache.NoExpiration)
-
-		response := map[string]any{
-			"webhook": webhook,
-			"jid":     jid,
-			"events":  eventstring,
-			"details": "Connected!",
-		}
+		response := map[string]interface{}{"webhook": webhook, "jid": jid, "events": eventstring, "details": "Connected!"}
 		responseJson, err := json.Marshal(response)
 		if err != nil {
 			s.Respond(w, r, http.StatusInternalServerError, err)
 			return
+		} else {
+			s.Respond(w, r, http.StatusOK, string(responseJson))
+			return
 		}
-
-		s.Respond(w, r, http.StatusOK, string(responseJson))
 	}
 }
 
