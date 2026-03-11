@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -27,10 +28,19 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+// ServerMode represents the server operating mode
+type ServerMode int
+
+const (
+	HTTP ServerMode = iota
+	Stdio
+)
+
 type server struct {
 	db     *sqlx.DB
 	router *mux.Router
 	exPath string
+	mode   ServerMode
 }
 
 // Replace the global variables
@@ -50,8 +60,14 @@ var (
 	globalWebhook       = flag.String("globalwebhook", "", "Global webhook URL to receive all events from all users")
 	versionFlag         = flag.Bool("version", false, "Display version information and exit")
 	mode                = flag.String("mode", "http", "Server mode: http or stdio")
+	dataDir             = flag.String("datadir", "", "Data directory for database and session files (defaults to executable directory)")
 
 	globalHMACKeyEncrypted []byte
+
+	webhookRetryEnabled      = flag.Bool("webhookretry", true, "Enable webhook retry mechanism")
+	webhookRetryCount        = flag.Int("retrycount", 5, "Number of times to retry failed webhooks")
+	webhookRetryDelaySeconds = flag.Int("retrydelay", 30, "Delay in seconds between webhook retries")
+	webhookErrorQueueName    = flag.String("errorqueue", "webhook_errors", "RabbitMQ queue name for failed webhooks")
 
 	container        *sqlstore.Container
 	clientManager    = NewClientManager()
@@ -63,7 +79,7 @@ var (
 
 var privateIPBlocks []*net.IPNet
 
-const version = "1.0.5"
+const version = "1.0.6"
 
 func newSafeHTTPClient() *http.Client {
 	return &http.Client{
@@ -163,6 +179,46 @@ func main() {
 	}
 
 	flag.Parse()
+
+	// Check for address in environment variable if flag is default or empty
+	if *address == "0.0.0.0" || *address == "" {
+		if v := os.Getenv("WUZAPI_ADDRESS"); v != "" {
+			*address = v
+			log.Info().Str("address", v).Msg("Address configured from environment variable")
+		}
+	}
+
+	// Check for port in environment variable if flag is default or empty
+	if *port == "8080" || *port == "" {
+		if v := os.Getenv("WUZAPI_PORT"); v != "" {
+			*port = v
+			log.Info().Str("port", v).Msg("Port configured from environment variable")
+		}
+	}
+
+	if v := os.Getenv("WEBHOOK_RETRY_ENABLED"); v != "" {
+		*webhookRetryEnabled = strings.ToLower(v) == "true" || v == "1"
+	}
+	if v := os.Getenv("WEBHOOK_RETRY_COUNT"); v != "" {
+		if count, err := strconv.Atoi(v); err == nil {
+			*webhookRetryCount = count
+		}
+	}
+	if v := os.Getenv("WEBHOOK_RETRY_DELAY_SECONDS"); v != "" {
+		if delay, err := strconv.Atoi(v); err == nil {
+			*webhookRetryDelaySeconds = delay
+		}
+	}
+	if v := os.Getenv("WEBHOOK_ERROR_QUEUE_NAME"); v != "" {
+		*webhookErrorQueueName = v
+	}
+
+	log.Info().
+		Bool("enabled", *webhookRetryEnabled).
+		Int("count", *webhookRetryCount).
+		Int("delay", *webhookRetryDelaySeconds).
+		Str("queue", *webhookErrorQueueName).
+		Msg("Webhook Retry Configured")
 
 	// Novo bloco para sobrescrever o osName pelo ENV, se existir
 	if v := os.Getenv("SESSION_DEVICE_NAME"); v != "" {
@@ -309,7 +365,7 @@ func main() {
 	}
 	exPath := filepath.Dir(ex)
 
-	db, err := InitializeDatabase(exPath)
+	db, err := InitializeDatabase(exPath, *dataDir)
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to initialize database")
 		os.Exit(1)
@@ -320,6 +376,9 @@ func main() {
 			log.Error().Err(err).Msg("Failed to close database connection")
 		}
 	}()
+
+	// Set DB reference in S3Manager for lazy client initialization
+	GetS3Manager().SetDB(db)
 
 	// Initialize the schema
 	if err = initializeSchema(db); err != nil {
@@ -337,7 +396,7 @@ func main() {
 	}
 
 	// Get database configuration
-	config := getDatabaseConfig(exPath)
+	config := getDatabaseConfig(exPath, *dataDir)
 	var storeConnStr string
 	if config.Type == "postgres" {
 		storeConnStr = fmt.Sprintf(
@@ -355,16 +414,22 @@ func main() {
 		os.Exit(1)
 	}
 
+	serverMode := HTTP
+	if *mode == "stdio" {
+		serverMode = Stdio
+	}
+
 	s := &server{
 		router: mux.NewRouter(),
 		db:     db,
 		exPath: exPath,
+		mode:   serverMode,
 	}
 	s.routes()
 
 	s.connectOnStartup()
 
-	if *mode == "stdio" {
+	if serverMode == Stdio {
 		startStdioMode(s)
 	} else {
 		startHTTPMode(s)
